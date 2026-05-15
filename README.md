@@ -4,6 +4,12 @@ Automated bug bounty reconnaissance, AI-assisted vulnerability hypotheses, basic
 
 Use this only on targets you own or have explicit permission to test.
 
+Groq AI is used to:
+
+- Analyze recon data and choose likely vulnerability hypotheses.
+- Suggest context-aware, non-destructive payloads for those hypotheses.
+- Summarize confirmed findings, likely false positives, manual verification steps, and report notes.
+
 ## WSL Quick Start
 
 Open Ubuntu/WSL and run:
@@ -167,9 +173,10 @@ Python packages:
 3. Checks live HTTP services.
 4. Fetches historical URLs.
 5. Detects technology stack.
-6. Sends recon data to Groq for vulnerability hypotheses.
-7. Tests basic SQLi, XSS, SSRF, and LFI payloads.
-8. Generates an HTML report.
+6. Sends recon data to Groq for vulnerability hypotheses and payload ideas.
+7. Tests Groq-suggested payloads plus built-in SQLi, XSS, SSRF, LFI, redirect, CORS, auth, and header checks.
+8. Sends results back to Groq for triage notes and manual verification guidance.
+9. Generates an HTML report.
 
 ## Troubleshooting
 

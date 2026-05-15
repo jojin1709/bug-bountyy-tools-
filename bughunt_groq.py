@@ -15,6 +15,7 @@ import re
 import random
 import shlex
 import urllib3
+import html as html_lib
 from typing import List, Dict, Optional
 from urllib.parse import urlparse, urlencode
 
@@ -94,6 +95,8 @@ TOOLS = {
 
 PIP_PACKAGES = ["groq>=0.9.0", "cloudscraper>=1.2.71", "requests>=2.31.0", "urllib3>=2.0.0"]
 APT_PACKAGES  = ["golang-go", "git", "curl", "jq", "whatweb"]
+
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # Use random_headers() everywhere — no static HEADERS dict
 
@@ -180,6 +183,36 @@ def run_cmd(cmd: str, timeout: int = 120) -> str:
         return ""
     except Exception:
         return ""
+
+def esc(value) -> str:
+    """Escape values before inserting them into the HTML report."""
+    return html_lib.escape(str(value), quote=True)
+
+def parse_json_array(text: str) -> List[Dict]:
+    text = re.sub(r"```json|```", "", text).strip()
+    start = text.find("[")
+    end = text.rfind("]") + 1
+    if start >= 0 and end > start:
+        data = json.loads(text[start:end])
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+    return []
+
+def merge_payloads(defaults: List[str], ai_payloads, limit: int = 12) -> List[str]:
+    """Prefer Groq context payloads, then fall back to stable defaults."""
+    merged = []
+    if isinstance(ai_payloads, list):
+        for payload in ai_payloads:
+            if isinstance(payload, str):
+                payload = payload.strip()
+                if payload and len(payload) <= 250 and payload not in merged:
+                    merged.append(payload)
+
+    for payload in defaults:
+        if payload not in merged:
+            merged.append(payload)
+
+    return merged[:limit]
 
 def get_session() -> cloudscraper.CloudScraper:
     """Cloudscraper session — bypasses Cloudflare JS challenges."""
@@ -463,44 +496,39 @@ RULES:
 RESPOND ONLY WITH VALID JSON ARRAY. NO MARKDOWN. NO EXTRA TEXT.
 Format:
 [
-  {{"endpoint": "/api/v1/users/1", "method": "GET", "vuln_type": "IDOR", "params": {{"id": "1"}}, "reason": "Numeric user ID in REST API path, try incrementing"}},
-  {{"endpoint": "/search", "method": "GET", "vuln_type": "XSS", "params": {{"q": "FUZZ"}}, "reason": "Search parameter reflected in response"}}
+  {{"endpoint": "/api/v1/users/1", "method": "GET", "vuln_type": "IDOR", "params": {{"id": "1"}}, "payloads": ["id=1", "id=2"], "reason": "Numeric user ID in REST API path, try incrementing"}},
+  {{"endpoint": "/search", "method": "GET", "vuln_type": "XSS", "params": {{"q": "FUZZ"}}, "payloads": ["<img src=x onerror=alert(1)>"], "reason": "Search parameter reflected in response"}}
 ]
 
 vuln_type must be one of: SQLi, XSS, IDOR, LFI, SSRF, OpenRedirect, BrokenAuth, MissingHeaders, CORS
+payloads must be a short list of safe, non-destructive test strings for that vuln type.
 Max 15 hypotheses. ONLY JSON."""
 
     try:
         print("[*] Calling Groq API...")
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=2000,
             temperature=0.2,
         )
         text = response.choices[0].message.content.strip()
-
-        # Strip markdown fences if present
-        text = re.sub(r"```json|```", "", text).strip()
-
-        start = text.find("[")
-        end = text.rfind("]") + 1
-        if start >= 0 and end > start:
-            hypotheses = json.loads(text[start:end])
+        hypotheses = parse_json_array(text)
+        if hypotheses:
             print(f"[+] Generated {len(hypotheses)} hypotheses")
             return hypotheses
-        else:
-            print("[!] Could not parse Groq JSON response")
-            return []
+
+        print("[!] Could not parse Groq JSON response")
+        return []
     except Exception as e:
         print(f"[!] Groq error: {e}")
         return []
 
 # ============ PHASE 4: VULN TESTING ============
 
-def test_sqli(url: str, params: Dict, session) -> Optional[Dict]:
+def test_sqli(url: str, params: Dict, session, payloads=None) -> Optional[Dict]:
     """Real SQLi: check for DB error strings in response."""
-    for payload in SQLI_PAYLOADS:
+    for payload in merge_payloads(SQLI_PAYLOADS, payloads):
         try:
             test_params = {k: payload for k in params}
             r = cf_request(session, "GET", url, params=test_params)
@@ -520,9 +548,9 @@ def test_sqli(url: str, params: Dict, session) -> Optional[Dict]:
             pass
     return None
 
-def test_xss(url: str, params: Dict, session) -> Optional[Dict]:
+def test_xss(url: str, params: Dict, session, payloads=None) -> Optional[Dict]:
     """Real XSS: payload must be reflected unencoded in response body."""
-    for payload in XSS_PAYLOADS:
+    for payload in merge_payloads(XSS_PAYLOADS, payloads):
         try:
             test_params = {k: payload for k in params}
             r = cf_request(session, "GET", url, params=test_params)
@@ -568,7 +596,7 @@ def test_idor(url: str, session) -> Optional[Dict]:
         pass
     return None
 
-def test_lfi(url: str, params: Dict, session) -> Optional[Dict]:
+def test_lfi(url: str, params: Dict, session, payloads=None) -> Optional[Dict]:
     """Real LFI: check for /etc/passwd or win.ini content in response."""
     lfi_payloads = [
         "../../../../etc/passwd",
@@ -576,7 +604,7 @@ def test_lfi(url: str, params: Dict, session) -> Optional[Dict]:
         "%2e%2e%2f%2e%2e%2fetc%2fpasswd",
         "..%252f..%252fetc%252fpasswd",
     ]
-    for payload in lfi_payloads:
+    for payload in merge_payloads(lfi_payloads, payloads):
         try:
             test_params = {k: payload for k in params}
             r = cf_request(session, "GET", url, params=test_params)
@@ -595,14 +623,14 @@ def test_lfi(url: str, params: Dict, session) -> Optional[Dict]:
             pass
     return None
 
-def test_ssrf(url: str, params: Dict, session) -> Optional[Dict]:
+def test_ssrf(url: str, params: Dict, session, payloads=None) -> Optional[Dict]:
     """SSRF: test with metadata IP and check for cloud metadata keywords."""
     ssrf_targets = [
         "http://169.254.169.254/latest/meta-data/",
         "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
         "http://metadata.google.internal/computeMetadata/v1/",
     ]
-    for payload in ssrf_targets:
+    for payload in merge_payloads(ssrf_targets, payloads):
         try:
             test_params = {k: payload for k in params}
             r = cf_request(session, "GET", url, params=test_params)
@@ -621,9 +649,9 @@ def test_ssrf(url: str, params: Dict, session) -> Optional[Dict]:
             pass
     return None
 
-def test_open_redirect(url: str, params: Dict, session) -> Optional[Dict]:
+def test_open_redirect(url: str, params: Dict, session, payloads=None) -> Optional[Dict]:
     """Open redirect: check if response redirects to our payload domain."""
-    for payload in OPEN_REDIRECT_PAYLOADS:
+    for payload in merge_payloads(OPEN_REDIRECT_PAYLOADS, payloads):
         try:
             test_params = {k: payload for k in params}
             r = cf_request(session, "GET", url, params=test_params, allow_redirects=False)
@@ -716,22 +744,23 @@ def test_hypothesis_sync(target: str, hyp: Dict, session) -> Optional[Dict]:
     endpoint  = hyp.get("endpoint", "/")
     vuln_type = hyp.get("vuln_type", "").lower()
     params    = hyp.get("params", {"id": "1"})
+    payloads  = hyp.get("payloads", [])
     url       = make_url(target, endpoint)
 
     finding = None
 
     if vuln_type == "sqli":
-        finding = test_sqli(url, params, session)
+        finding = test_sqli(url, params, session, payloads)
     elif vuln_type == "xss":
-        finding = test_xss(url, params, session)
+        finding = test_xss(url, params, session, payloads)
     elif vuln_type == "idor":
         finding = test_idor(url, session)
     elif vuln_type == "lfi":
-        finding = test_lfi(url, params, session)
+        finding = test_lfi(url, params, session, payloads)
     elif vuln_type == "ssrf":
-        finding = test_ssrf(url, params, session)
+        finding = test_ssrf(url, params, session, payloads)
     elif vuln_type == "openredirect":
-        finding = test_open_redirect(url, params, session)
+        finding = test_open_redirect(url, params, session, payloads)
     elif vuln_type == "missingheaders":
         finding = test_missing_headers(url, session)
     elif vuln_type == "cors":
@@ -748,6 +777,7 @@ def test_hypothesis_sync(target: str, hyp: Dict, session) -> Optional[Dict]:
             "evidence":        finding["evidence"],
             "poc":             finding["poc"],
             "response_sample": finding.get("response_sample", ""),
+            "ai_payloads":     payloads[:8] if isinstance(payloads, list) else [],
         }
     return None
 
@@ -853,6 +883,65 @@ async def test_all(target: str, hypotheses: List[Dict], urls: List[str]) -> List
     print(f"[+] Total confirmed findings: {len(vulns)}")
     return vulns
 
+# ============ PHASE 4c: GROQ ANALYSIS ============
+
+def analyze_results_with_groq(target: str, recon_data: Dict, hypotheses: List[Dict], vulns: List[Dict]) -> str:
+    """Use Groq to summarize findings, likely false positives, and next manual checks."""
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if not groq_api_key:
+        return "Groq analysis skipped because GROQ_API_KEY is not set."
+
+    client = Groq(api_key=groq_api_key)
+    scan_summary = {
+        "target": target,
+        "tech": recon_data.get("tech", "")[:800],
+        "open_ports": recon_data.get("ports", [])[:20],
+        "live_hosts": recon_data.get("live_hosts", [])[:10],
+        "sample_urls": recon_data.get("urls", [])[:40],
+        "hypotheses": hypotheses[:15],
+        "confirmed_findings": [
+            {
+                "endpoint": v.get("endpoint"),
+                "vuln_type": v.get("vuln_type"),
+                "evidence": v.get("evidence"),
+                "payload": v.get("payload"),
+            }
+            for v in vulns[:20]
+        ],
+    }
+
+    prompt = f"""You are helping with an authorized bug bounty scan report.
+
+Analyze this scan data and produce concise, practical notes for a human tester.
+
+Return plain text with these short sections:
+1. Key findings
+2. Likely false positives / verification cautions
+3. Next manual checks
+4. Additional safe payload ideas for the same endpoints
+5. Report writing notes
+
+Keep suggestions non-destructive and scoped to the target data. Do not suggest persistence, malware, credential theft, or out-of-scope exploitation.
+
+SCAN DATA:
+{json.dumps(scan_summary, indent=2)[:12000]}
+"""
+
+    try:
+        print("[*] Asking Groq to analyze findings...")
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1800,
+            temperature=0.2,
+        )
+        analysis = response.choices[0].message.content.strip()
+        print("[+] Groq analysis added to report")
+        return analysis[:6000]
+    except Exception as e:
+        print(f"[!] Groq analysis failed: {e}")
+        return f"Groq analysis failed: {e}"
+
 # ============ PHASE 5: REPORT ============
 
 SEVERITY_MAP = {
@@ -877,18 +966,19 @@ SEVERITY_COLOR = {
     "low":      "#ffff00",
 }
 
-def generate_report(target: str, vulns: List[Dict], recon_data: Dict) -> str:
+def generate_report(target: str, vulns: List[Dict], recon_data: Dict, ai_analysis: str = "") -> str:
     critical = [v for v in vulns if get_severity(v["vuln_type"]) == "critical"]
     high     = [v for v in vulns if get_severity(v["vuln_type"]) == "high"]
     medium   = [v for v in vulns if get_severity(v["vuln_type"]) == "medium"]
     low      = [v for v in vulns if get_severity(v["vuln_type"]) == "low"]
+    target_html = esc(target)
 
     html = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BugHunt Report - {target}</title>
+    <title>BugHunt Report - {target_html}</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
@@ -951,6 +1041,12 @@ def generate_report(target: str, vulns: List[Dict], recon_data: Dict) -> str:
             border-radius: 5px; margin: 20px 0;
         }}
         .recon-section h2 {{ color: #00d4ff; margin-bottom: 15px; }}
+        .ai-section {{
+            background: #111936; padding: 20px;
+            border-radius: 5px; margin: 20px 0;
+            border: 1px solid #6ee7b7;
+        }}
+        .ai-section h2 {{ color: #6ee7b7; margin-bottom: 15px; }}
         .recon-item {{ padding: 4px 0; color: #aaa; font-size: 0.9em; }}
         .footer {{
             text-align: center; margin-top: 40px;
@@ -965,7 +1061,7 @@ def generate_report(target: str, vulns: List[Dict], recon_data: Dict) -> str:
     <div class="header">
         <h1>🔍 BugHunt Report</h1>
         <p>Automated Reconnaissance &amp; Vulnerability Analysis</p>
-        <p style="margin-top:10px;color:#00d4ff;">Target: <strong>{target}</strong></p>
+        <p style="margin-top:10px;color:#00d4ff;">Target: <strong>{target_html}</strong></p>
         <span class="badge">Groq AI Powered (Free)</span>
         <span class="badge">v2.0</span>
     </div>
@@ -1002,11 +1098,19 @@ def generate_report(target: str, vulns: List[Dict], recon_data: Dict) -> str:
     html += f"""
     <div class="recon-section">
         <h2>📡 Recon Summary</h2>
-        <div class="recon-item">🔗 Subdomains: {', '.join(recon_data.get('subdomains', [])[:10])}</div>
-        <div class="recon-item">🟢 Live Hosts: {', '.join(recon_data.get('live_hosts', [])[:5])}</div>
-        <div class="recon-item">🔌 Open Ports: {', '.join(recon_data.get('ports', [])[:10])}</div>
+        <div class="recon-item">🔗 Subdomains: {esc(', '.join(recon_data.get('subdomains', [])[:10]))}</div>
+        <div class="recon-item">🟢 Live Hosts: {esc(', '.join(recon_data.get('live_hosts', [])[:5]))}</div>
+        <div class="recon-item">🔌 Open Ports: {esc(', '.join(recon_data.get('ports', [])[:10]))}</div>
         <div class="recon-item">🌐 URLs Found: {len(recon_data.get('urls', []))}</div>
-        <div class="recon-item">⚙️ Tech: {recon_data.get('tech', 'N/A')[:300]}</div>
+        <div class="recon-item">⚙️ Tech: {esc(recon_data.get('tech', 'N/A')[:300])}</div>
+    </div>
+"""
+
+    if ai_analysis:
+        html += f"""
+    <div class="ai-section">
+        <h2>Groq AI Analysis</h2>
+        <pre>{esc(ai_analysis)}</pre>
     </div>
 """
 
@@ -1026,25 +1130,31 @@ def generate_report(target: str, vulns: List[Dict], recon_data: Dict) -> str:
         for i, vuln in enumerate(vulns_sorted, 1):
             sev = get_severity(vuln["vuln_type"])
             color = SEVERITY_COLOR.get(sev, "#aaa")
+            ai_payloads = vuln.get("ai_payloads", [])
+            ai_payload_text = "\n".join(str(p) for p in ai_payloads) if ai_payloads else "N/A"
             html += f"""
     <div class="vuln" style="border-left: 4px solid {color};">
         <h3>
             <span class="sev-badge" style="background:{color};color:#000;">{sev.upper()}</span>
-            <strong>{vuln['vuln_type']}</strong> @ <code>{vuln['endpoint']}</code>
+            <strong>{esc(vuln['vuln_type'])}</strong> @ <code>{esc(vuln['endpoint'])}</code>
         </h3>
-        <div class="vuln-detail"><strong>Reason:</strong> {vuln.get('reason', 'N/A')}</div>
-        <div class="vuln-detail"><strong>Evidence:</strong> {vuln.get('evidence', 'N/A')}</div>
+        <div class="vuln-detail"><strong>Reason:</strong> {esc(vuln.get('reason', 'N/A'))}</div>
+        <div class="vuln-detail"><strong>Evidence:</strong> {esc(vuln.get('evidence', 'N/A'))}</div>
+        <div class="vuln-detail">
+            <strong>Groq Suggested Payloads:</strong>
+            <pre>{esc(ai_payload_text)}</pre>
+        </div>
         <div class="vuln-detail">
             <strong>Payload:</strong>
-            <pre>{vuln.get('payload', 'N/A')}</pre>
+            <pre>{esc(vuln.get('payload', 'N/A'))}</pre>
         </div>
         <div class="vuln-detail">
             <strong>Proof of Concept:</strong>
-            <pre>{vuln.get('poc', 'N/A')}</pre>
+            <pre>{esc(vuln.get('poc', 'N/A'))}</pre>
         </div>
         <div class="vuln-detail">
             <strong>Response Sample:</strong>
-            <pre>{str(vuln.get('response_sample', 'N/A'))[:400]}</pre>
+            <pre>{esc(str(vuln.get('response_sample', 'N/A'))[:400])}</pre>
         </div>
     </div>
 """
@@ -1128,7 +1238,8 @@ Get free Groq API key: https://console.groq.com
             hypotheses = []
 
         vulns = await test_all(target, hypotheses, filtered["urls"])
-        html  = generate_report(target, vulns, filtered)
+        ai_analysis = analyze_results_with_groq(target, filtered, hypotheses, vulns)
+        html  = generate_report(target, vulns, filtered, ai_analysis)
 
         filename = f"{target.replace('.', '_')}_report.html"
         with open(filename, "w") as f:

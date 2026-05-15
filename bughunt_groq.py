@@ -5,6 +5,8 @@ Groq API Edition (Free) - v2.1
 Cloudflare bypass + UA rotation + retry logic.
 """
 
+from __future__ import annotations
+
 import asyncio
 import subprocess
 import sys
@@ -23,13 +25,25 @@ from urllib.parse import urlparse, urlencode
 # Suppress SSL warnings — intentional for bug bounty
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+MISSING_PY_DEPS = []
+
 try:
     import cloudscraper
+except ImportError:
+    cloudscraper = None
+    MISSING_PY_DEPS.append("cloudscraper")
+
+try:
     import requests
+except ImportError:
+    requests = None
+    MISSING_PY_DEPS.append("requests")
+
+try:
     from groq import Groq
 except ImportError:
-    print("[!] Missing dependencies. Run: pip3 install -r requirements_groq.txt")
-    sys.exit(1)
+    Groq = None
+    MISSING_PY_DEPS.append("groq")
 
 # ============ UA ROTATION ============
 USER_AGENTS = [
@@ -67,7 +81,7 @@ def whatweb_user_agent_arg() -> str:
 
 def random_headers() -> Dict:
     ua = selected_user_agent()
-    return {
+    return apply_user_auth_headers({
         "User-Agent": ua,
         "Accept": "application/json, text/html, */*;q=0.9",
         "Accept-Language": "en-US,en;q=0.9",
@@ -81,7 +95,7 @@ def random_headers() -> Dict:
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
         "Cache-Control": "max-age=0",
-    }
+    })
 
 # ============ CONFIG ============
 TOOLS = {
@@ -105,8 +119,9 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 SQLI_PAYLOADS = [
     "'", "\"", "1'", "1\"",
     "' OR '1'='1'--", "\" OR \"1\"=\"1\"--",
-    "1 AND 1=2", "1 AND SLEEP(0)--",
-    "'; SELECT 1--", "1; DROP TABLE--",
+    "' OR '1'='2'--", "\" OR \"1\"=\"2\"--",
+    "1 AND 1=1", "1 AND 1=2",
+    "' AND 'a'='a'--", "' AND 'a'='b'--",
 ]
 
 XSS_PAYLOADS = [
@@ -254,6 +269,30 @@ def env_int(name: str, default: int) -> int:
     except ValueError:
         return default
 
+def env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+def clamp(value: int, low: int, high: int) -> int:
+    return max(low, min(high, value))
+
+def load_program_rules() -> str:
+    """Load optional private program rules without committing them to the repo."""
+    rules = os.getenv("BUGHUNT_PROGRAM_RULES", "").strip()
+    if rules:
+        return rules[:4000]
+
+    path = os.getenv("BUGHUNT_PROGRAM_RULES_FILE", "program_rules.txt")
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                return f.read()[:4000]
+    except Exception:
+        pass
+    return ""
+
 def esc(value) -> str:
     """Escape values before inserting them into the HTML report."""
     return html_lib.escape(str(value), quote=True)
@@ -284,6 +323,25 @@ def merge_payloads(defaults: List[str], ai_payloads, limit: int = 12) -> List[st
 
     return merged[:limit]
 
+def apply_user_auth_headers(headers: Dict) -> Dict:
+    """Attach user-provided auth only when the tester explicitly supplies it."""
+    cookie = os.getenv("BUGHUNT_COOKIE", "").strip()
+    authorization = os.getenv("BUGHUNT_AUTHORIZATION", "").strip()
+
+    if cookie:
+        headers["Cookie"] = cookie
+    if authorization:
+        headers["Authorization"] = authorization
+
+    return headers
+
+def ensure_python_deps():
+    if MISSING_PY_DEPS:
+        missing = ", ".join(sorted(set(MISSING_PY_DEPS)))
+        print(f"[!] Missing Python dependencies: {missing}")
+        print("[!] Run: pip3 install -r requirements_groq.txt")
+        sys.exit(1)
+
 def get_session() -> cloudscraper.CloudScraper:
     """Cloudscraper session — bypasses Cloudflare JS challenges."""
     scraper = cloudscraper.create_scraper(
@@ -305,8 +363,10 @@ def cf_request(session: cloudscraper.CloudScraper, method: str, url: str,
     kwargs.setdefault("timeout", 10)
     kwargs.setdefault("verify", False)
 
-    # Random delay 0.5-2s between requests (avoid rate limiting)
-    time.sleep(random.uniform(0.5, 2.0))
+    # Random delay between requests (avoid rate limiting)
+    delay_min = env_float("BUGHUNT_DELAY_MIN", 0.8)
+    delay_max = max(delay_min, env_float("BUGHUNT_DELAY_MAX", 2.5))
+    time.sleep(random.uniform(delay_min, delay_max))
 
     for attempt in range(retries):
         try:
@@ -417,6 +477,48 @@ def setup():
 ║  python3 bughunt_groq.py hunt <url>   ║
 ╚═══════════════════════════════════════╝
 """)
+
+def doctor():
+    print("\n[*] BugHunt.ai Doctor\n")
+
+    print("[*] Go security tools")
+    for name in TOOLS:
+        cmd = tool_cmd(name)
+        exists = check_tool(name)
+        status = "OK" if exists else "MISSING"
+        print(f"  [{status}] {name}: {cmd}")
+
+    print("\n[*] System tools")
+    for name in ["go", "git", "curl", "jq", "whatweb"]:
+        exists = check_tool(name)
+        status = "OK" if exists else "MISSING"
+        print(f"  [{status}] {name}")
+
+    print("\n[*] Python packages")
+    packages = [
+        ("groq", "groq"),
+        ("cloudscraper", "cloudscraper"),
+        ("requests", "requests"),
+        ("urllib3", "urllib3"),
+    ]
+    for label, module in packages:
+        if module in MISSING_PY_DEPS:
+            print(f"  [MISSING] {label}")
+            continue
+        try:
+            __import__(module)
+            print(f"  [OK] {label}")
+        except Exception:
+            print(f"  [MISSING] {label}")
+
+    print("\n[*] Environment")
+    print(f"  GROQ_API_KEY: {'set' if os.getenv('GROQ_API_KEY') else 'missing'}")
+    print(f"  BUGHUNT_USER_AGENT: {'set' if custom_user_agent() else 'missing'}")
+    print(f"  BUGHUNT_COOKIE: {'set' if os.getenv('BUGHUNT_COOKIE') else 'missing'}")
+    print(f"  BUGHUNT_AUTHORIZATION: {'set' if os.getenv('BUGHUNT_AUTHORIZATION') else 'missing'}")
+    print(f"  PARALLEL_TESTS: {clamp(env_int('PARALLEL_TESTS', 4), 1, 10)}")
+    print(f"  ARCHIVE_TIMEOUT: {env_int('ARCHIVE_TIMEOUT', 45)}")
+    print(f"  REQUEST_DELAY: {env_float('BUGHUNT_DELAY_MIN', 0.8)}-{env_float('BUGHUNT_DELAY_MAX', 2.5)}s")
 
 # ============ PHASE 1: RECON ============
 
@@ -544,6 +646,64 @@ def filter_scope(recon_data: Dict, scope: str) -> Dict:
 
 # ============ PHASE 3: GROQ HYPOTHESES ============
 
+def get_ai_strategy(recon_data: Dict, target: str, scope: str) -> str:
+    print(f"\n[*] PHASE 2b: GROQ AI STRATEGY\n")
+
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if not groq_api_key:
+        return "Groq strategy skipped because GROQ_API_KEY is not set."
+
+    client = Groq(api_key=groq_api_key)
+    program_rules = load_program_rules()
+    strategy_data = {
+        "target": target,
+        "scope": [s.strip() for s in scope.splitlines() if s.strip()][:30],
+        "program_rules": program_rules,
+        "tech": recon_data.get("tech", "")[:800],
+        "live_hosts": recon_data.get("live_hosts", [])[:10],
+        "ports": recon_data.get("ports", [])[:20],
+        "priority_urls": recon_data.get("urls", [])[:60],
+        "js_files": recon_data.get("js_files", [])[:20],
+    }
+
+    prompt = f"""You are the AI planning brain for an authorized bug bounty helper.
+
+Create a concise safe testing strategy from the recon data. Focus on high-signal manual checks and safe automated checks.
+
+Rules:
+- Respect scope and program rules.
+- Prefer low-noise checks.
+- Do not recommend DoS, brute force, spam, destructive actions, data exfiltration, malware, persistence, or accessing data that is not owned by the tester.
+- If auth is needed, say to use only the tester's own account/session.
+- Prioritize qualifying bugs: access control, auth bypass, IDOR, SQLi, XSS with impact, SSRF/LFI with real impact, upload issues, business logic.
+- Flag non-qualifying/low-value ideas so the tester does not waste time.
+
+Return plain text with:
+1. Best targets/endpoints to inspect
+2. Manual test checklist
+3. Safe payload families to try
+4. Authenticated testing ideas if tester owns an account
+5. Things to avoid because of program rules
+
+DATA:
+{json.dumps(strategy_data, indent=2)[:12000]}
+"""
+
+    try:
+        print("[*] Asking Groq for a safe test strategy...")
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1800,
+            temperature=0.2,
+        )
+        strategy = response.choices[0].message.content.strip()
+        print("[+] Groq strategy ready")
+        return strategy[:6000]
+    except Exception as e:
+        print(f"[!] Groq strategy failed: {e}")
+        return f"Groq strategy failed: {e}"
+
 def get_hypotheses(recon_data: Dict, target: str) -> List[Dict]:
     print(f"\n[*] PHASE 3: GENERATING HYPOTHESES (Groq AI)\n")
 
@@ -559,10 +719,14 @@ def get_hypotheses(recon_data: Dict, target: str) -> List[Dict]:
     port_list  = recon_data["ports"][:10]
     sub_list   = recon_data["subdomains"][:10]
     js_list    = recon_data.get("js_files", [])[:5]
+    program_rules = load_program_rules()
 
     prompt = f"""You are an elite bug bounty hunter. Analyze this recon data and generate specific, testable vulnerability hypotheses.
 
 TARGET: {target}
+PROGRAM RULES / NOTES:
+{program_rules or 'No extra program rules provided.'}
+
 TECH STACK: {recon_data['tech'][:400]}
 OPEN PORTS: {', '.join(port_list) if port_list else 'unknown'}
 SUBDOMAINS: {', '.join(sub_list)}
@@ -955,9 +1119,16 @@ def run_nuclei(target: str, urls: List[str]) -> List[Dict]:
 
 async def test_all(target: str, hypotheses: List[Dict], urls: List[str]) -> List[Dict]:
     """Phase 4: Test all hypotheses + run nuclei."""
-    print(f"\n[*] PHASE 4: TESTING {len(hypotheses)} HYPOTHESES (PARALLEL)\n")
+    parallel_tests = clamp(env_int("PARALLEL_TESTS", 4), 1, 10)
+    print(f"\n[*] PHASE 4: TESTING {len(hypotheses)} HYPOTHESES (PARALLEL={parallel_tests})\n")
 
-    tasks = [test_hypothesis(target, h) for h in hypotheses]
+    semaphore = asyncio.Semaphore(parallel_tests)
+
+    async def limited_test(hyp):
+        async with semaphore:
+            return await test_hypothesis(target, hyp)
+
+    tasks = [limited_test(h) for h in hypotheses]
     try:
         results = await asyncio.gather(*tasks)
     except asyncio.CancelledError:
@@ -1273,6 +1444,7 @@ async def main():
 
 Usage:
   python3 bughunt_groq.py setup              # Install tools
+  python3 bughunt_groq.py doctor             # Check tools/env
   python3 bughunt_groq.py hunt <target>      # Run hunt
   python3 bughunt_groq.py hunt <target> <scope.txt>
 
@@ -1291,7 +1463,12 @@ Get free Groq API key: https://console.groq.com
         setup()
         return
 
+    if cmd == "doctor":
+        doctor()
+        return
+
     if cmd == "hunt":
+        ensure_python_deps()
         if len(sys.argv) < 3:
             print("Usage: python3 bughunt_groq.py hunt <target> [scope.txt]")
             sys.exit(1)
@@ -1320,6 +1497,7 @@ Get free Groq API key: https://console.groq.com
 
         recon_data   = recon(target)
         filtered     = filter_scope(recon_data, scope)
+        ai_strategy  = get_ai_strategy(filtered, target, scope)
         hypotheses   = get_hypotheses(filtered, target)
 
         if not hypotheses:
@@ -1329,7 +1507,8 @@ Get free Groq API key: https://console.groq.com
 
         vulns = await test_all(target, hypotheses, filtered["urls"])
         ai_analysis = analyze_results_with_groq(target, filtered, hypotheses, vulns)
-        html  = generate_report(target, vulns, filtered, ai_analysis)
+        combined_ai = f"=== Groq Strategy ===\n{ai_strategy}\n\n=== Groq Result Analysis ===\n{ai_analysis}"
+        html  = generate_report(target, vulns, filtered, combined_ai)
 
         filename = f"{target.replace('.', '_')}_report.html"
         with open(filename, "w") as f:
@@ -1345,8 +1524,6 @@ Get free Groq API key: https://console.groq.com
         print(f"[+] Open report: {report_open_hint(filename)}\n")
 
 if __name__ == "__main__":
-    if sys.platform.lower().startswith("win"):
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

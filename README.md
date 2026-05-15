@@ -8,6 +8,7 @@ Groq AI is used to:
 
 - Analyze recon data and choose likely vulnerability hypotheses.
 - Suggest context-aware, non-destructive payloads for those hypotheses.
+- Build a safe manual testing strategy from optional private program rules.
 - Summarize confirmed findings, likely false positives, manual verification steps, and report notes.
 
 ## WSL Quick Start
@@ -118,7 +119,9 @@ Optional:
 
 ```bash
 export TOOL_TIMEOUT="120"
-export PARALLEL_TESTS="10"
+export PARALLEL_TESTS="4"
+export BUGHUNT_DELAY_MIN="0.8"
+export BUGHUNT_DELAY_MAX="2.5"
 export ARCHIVE_TIMEOUT="45"
 export BUGHUNT_USER_AGENT="your-program-approved-user-agent"
 export HTTP_PROXY="http://proxy:8080"
@@ -138,6 +141,36 @@ You can also copy `.env.example` to `.env`, edit it, and load it:
 cp .env.example .env
 nano .env
 source .env
+```
+
+## Advanced AI Mode
+
+Run a health check first:
+
+```bash
+python3 bughunt_groq.py doctor
+```
+
+For strict programs, keep traffic low:
+
+```bash
+export PARALLEL_TESTS="2"
+export BUGHUNT_DELAY_MIN="1.5"
+export BUGHUNT_DELAY_MAX="4.0"
+```
+
+To let Groq plan around private program rules, create a local file that is ignored by Git:
+
+```bash
+nano program_rules.txt
+export BUGHUNT_PROGRAM_RULES_FILE="program_rules.txt"
+```
+
+For authenticated testing, use only your own test account/session:
+
+```bash
+export BUGHUNT_COOKIE="session=your-own-session-cookie"
+export BUGHUNT_AUTHORIZATION="Bearer your-own-token"
 ```
 
 ## What Setup Installs
@@ -174,10 +207,11 @@ Python packages:
 3. Checks live HTTP services.
 4. Fetches historical URLs.
 5. Detects technology stack.
-6. Sends recon data to Groq for vulnerability hypotheses and payload ideas.
-7. Tests Groq-suggested payloads plus built-in SQLi, XSS, SSRF, LFI, redirect, CORS, auth, and header checks.
-8. Sends results back to Groq for triage notes and manual verification guidance.
-9. Generates an HTML report.
+6. Sends recon data and optional program rules to Groq for a safe testing strategy.
+7. Sends recon data to Groq for vulnerability hypotheses and payload ideas.
+8. Tests Groq-suggested payloads plus built-in SQLi, XSS, SSRF, LFI, redirect, CORS, auth, and header checks.
+9. Sends results back to Groq for triage notes and manual verification guidance.
+10. Generates an HTML report.
 
 ## Troubleshooting
 

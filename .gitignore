@@ -1,4 +1,8 @@
 .env
+program_rules.txt
+cookies.txt
+headers.txt
+.bughunt/
 *.log
 __pycache__/
 *.py[cod]

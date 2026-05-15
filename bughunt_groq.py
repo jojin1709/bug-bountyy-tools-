@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 BugHunt.ai - Automated Bug Bounty Reconnaissance Framework
-Groq API Edition (Free) - v2.0
-Proper detection logic. No false positives. Real findings only.
+Groq API Edition (Free) - v2.1
+Cloudflare bypass + UA rotation + retry logic.
 """
 
 import asyncio
@@ -12,6 +12,7 @@ import os
 import json
 import time
 import re
+import random
 import urllib3
 from typing import List, Dict, Optional
 from urllib.parse import urlparse, urlencode
@@ -20,11 +21,41 @@ from urllib.parse import urlparse, urlencode
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 try:
-    import requests
+    import cloudscraper
     from groq import Groq
 except ImportError:
     print("[!] Missing dependencies. Run: pip3 install -r requirements_groq.txt")
     sys.exit(1)
+
+# ============ UA ROTATION ============
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
+]
+
+def random_headers() -> Dict:
+    ua = random.choice(USER_AGENTS)
+    return {
+        "User-Agent": ua,
+        "Accept": "application/json, text/html, */*;q=0.9",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "Cache-Control": "max-age=0",
+    }
 
 # ============ CONFIG ============
 TOOLS = {
@@ -37,14 +68,10 @@ TOOLS = {
     "katana":    "github.com/projectdiscovery/katana/cmd/katana",
 }
 
-PIP_PACKAGES = ["groq>=0.9.0", "requests>=2.31.0"]
+PIP_PACKAGES = ["groq>=0.9.0", "cloudscraper>=1.2.71", "requests>=2.31.0"]
 APT_PACKAGES  = ["golang-go", "git", "curl", "jq", "whatweb"]
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/html, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-}
+# Use random_headers() everywhere — no static HEADERS dict
 
 # ============ PAYLOADS ============
 SQLI_PAYLOADS = [
@@ -130,11 +157,58 @@ def run_cmd(cmd: str, timeout: int = 120) -> str:
     except Exception:
         return ""
 
-def get_session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update(HEADERS)
-    s.verify = False
-    return s
+def get_session() -> cloudscraper.CloudScraper:
+    """Cloudscraper session — bypasses Cloudflare JS challenges."""
+    scraper = cloudscraper.create_scraper(
+        browser={"browser": "chrome", "platform": "windows", "mobile": False}
+    )
+    scraper.headers.update(random_headers())
+    scraper.verify = False
+    return scraper
+
+def cf_request(session: cloudscraper.CloudScraper, method: str, url: str,
+               retries: int = 3, **kwargs) -> Optional[object]:
+    """
+    Request with:
+    - Cloudflare bypass via cloudscraper
+    - Random UA per retry
+    - Exponential backoff on 403/429/503
+    - Random delay between requests (stealth)
+    """
+    kwargs.setdefault("timeout", 10)
+    kwargs.setdefault("verify", False)
+
+    # Random delay 0.5-2s between requests (avoid rate limiting)
+    time.sleep(random.uniform(0.5, 2.0))
+
+    for attempt in range(retries):
+        try:
+            session.headers.update(random_headers())
+            if method.upper() == "GET":
+                r = session.get(url, **kwargs)
+            else:
+                r = session.post(url, **kwargs)
+
+            if r.status_code in [429, 503]:
+                wait = 2 ** attempt + random.uniform(1, 3)
+                print(f"[!] Rate limited ({r.status_code}), waiting {wait:.1f}s...")
+                time.sleep(wait)
+                continue
+
+            if r.status_code == 403:
+                # CF block — rotate UA and retry
+                session.headers.update(random_headers())
+                time.sleep(random.uniform(2, 5))
+                continue
+
+            return r
+
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+            continue
+
+    return None
 
 def make_url(target: str, endpoint: str) -> str:
     if target.startswith("http"):
@@ -398,13 +472,13 @@ Max 15 hypotheses. ONLY JSON."""
 
 # ============ PHASE 4: VULN TESTING ============
 
-def test_sqli(url: str, params: Dict, session: requests.Session) -> Optional[Dict]:
+def test_sqli(url: str, params: Dict, session) -> Optional[Dict]:
     """Real SQLi: check for DB error strings in response."""
     for payload in SQLI_PAYLOADS:
         try:
             test_params = {k: payload for k in params}
-            r = session.get(url, params=test_params, timeout=8)
-            if is_spa_response(r.text):
+            r = cf_request(session, "GET", url, params=test_params)
+            if r is None or is_spa_response(r.text):
                 return None
             text_lower = r.text.lower()
             for err in SQLI_ERRORS:
@@ -420,20 +494,19 @@ def test_sqli(url: str, params: Dict, session: requests.Session) -> Optional[Dic
             pass
     return None
 
-def test_xss(url: str, params: Dict, session: requests.Session) -> Optional[Dict]:
+def test_xss(url: str, params: Dict, session) -> Optional[Dict]:
     """Real XSS: payload must be reflected unencoded in response body."""
     for payload in XSS_PAYLOADS:
         try:
             test_params = {k: payload for k in params}
-            r = session.get(url, params=test_params, timeout=8)
-            if is_spa_response(r.text):
+            r = cf_request(session, "GET", url, params=test_params)
+            if r is None or is_spa_response(r.text):
                 return None
-            # Must be exact unencoded reflection — not HTML-encoded
             if payload in r.text and "text/html" in r.headers.get("content-type", ""):
                 return {
                     "vulnerable": True,
                     "payload": payload,
-                    "evidence": f"Payload reflected unencoded in HTML response",
+                    "evidence": "Payload reflected unencoded in HTML response",
                     "poc": f"curl -g '{url}?{list(params.keys())[0]}={payload}'",
                     "response_sample": r.text[:500],
                 }
@@ -441,30 +514,27 @@ def test_xss(url: str, params: Dict, session: requests.Session) -> Optional[Dict
             pass
     return None
 
-def test_idor(url: str, session: requests.Session) -> Optional[Dict]:
-    """Real IDOR: hit endpoint with id=1 and id=2, compare responses.
-    Only flag if both return 200 JSON with DIFFERENT non-empty bodies."""
+def test_idor(url: str, session) -> Optional[Dict]:
+    """Real IDOR: hit endpoint with id=1 and id=2, compare responses."""
     try:
-        r1 = session.get(url, params={"id": "1"}, timeout=8)
-        r2 = session.get(url, params={"id": "2"}, timeout=8)
-
-        # Must be JSON API responses, not HTML
+        r1 = cf_request(session, "GET", url, params={"id": "1"})
+        r2 = cf_request(session, "GET", url, params={"id": "2"})
+        if r1 is None or r2 is None:
+            return None
         if is_spa_response(r1.text) or is_spa_response(r2.text):
             return None
         if not is_json_response(r1) or not is_json_response(r2):
             return None
         if r1.status_code != 200 or r2.status_code != 200:
             return None
-        # Responses must be non-empty and different (different users)
         if len(r1.text) < 10 or len(r2.text) < 10:
             return None
         if r1.text.strip() == r2.text.strip():
             return None
-        # Both return data — potential IDOR
         return {
             "vulnerable": True,
             "payload": "id=1 vs id=2",
-            "evidence": f"Both IDs return 200 JSON with different data. id=1 ({len(r1.text)}b) vs id=2 ({len(r2.text)}b). Verify manually.",
+            "evidence": f"Both IDs return 200 JSON with different data. Verify manually.",
             "poc": f"curl '{url}?id=1' && curl '{url}?id=2'",
             "response_sample": r1.text[:300],
         }
@@ -472,7 +542,7 @@ def test_idor(url: str, session: requests.Session) -> Optional[Dict]:
         pass
     return None
 
-def test_lfi(url: str, params: Dict, session: requests.Session) -> Optional[Dict]:
+def test_lfi(url: str, params: Dict, session) -> Optional[Dict]:
     """Real LFI: check for /etc/passwd or win.ini content in response."""
     lfi_payloads = [
         "../../../../etc/passwd",
@@ -483,7 +553,9 @@ def test_lfi(url: str, params: Dict, session: requests.Session) -> Optional[Dict
     for payload in lfi_payloads:
         try:
             test_params = {k: payload for k in params}
-            r = session.get(url, params=test_params, timeout=8)
+            r = cf_request(session, "GET", url, params=test_params)
+            if r is None:
+                continue
             for indicator in LFI_INDICATORS:
                 if indicator in r.text:
                     return {
@@ -497,7 +569,7 @@ def test_lfi(url: str, params: Dict, session: requests.Session) -> Optional[Dict
             pass
     return None
 
-def test_ssrf(url: str, params: Dict, session: requests.Session) -> Optional[Dict]:
+def test_ssrf(url: str, params: Dict, session) -> Optional[Dict]:
     """SSRF: test with metadata IP and check for cloud metadata keywords."""
     ssrf_targets = [
         "http://169.254.169.254/latest/meta-data/",
@@ -507,8 +579,8 @@ def test_ssrf(url: str, params: Dict, session: requests.Session) -> Optional[Dic
     for payload in ssrf_targets:
         try:
             test_params = {k: payload for k in params}
-            r = session.get(url, params=test_params, timeout=8)
-            if is_spa_response(r.text):
+            r = cf_request(session, "GET", url, params=test_params)
+            if r is None or is_spa_response(r.text):
                 continue
             for ind in SSRF_INDICATORS:
                 if ind in r.text.lower():
@@ -523,16 +595,17 @@ def test_ssrf(url: str, params: Dict, session: requests.Session) -> Optional[Dic
             pass
     return None
 
-def test_open_redirect(url: str, params: Dict, session: requests.Session) -> Optional[Dict]:
+def test_open_redirect(url: str, params: Dict, session) -> Optional[Dict]:
     """Open redirect: check if response redirects to our payload domain."""
     for payload in OPEN_REDIRECT_PAYLOADS:
         try:
             test_params = {k: payload for k in params}
-            # Don't follow redirects so we can check Location header
-            r = session.get(url, params=test_params, timeout=8, allow_redirects=False)
+            r = cf_request(session, "GET", url, params=test_params, allow_redirects=False)
+            if r is None:
+                continue
             location = r.headers.get("location", "")
             if r.status_code in [301, 302, 303, 307, 308]:
-                if "evil.com" in location or (payload.startswith("//") and location.startswith("//")):
+                if "evil.com" in location:
                     return {
                         "vulnerable": True,
                         "payload": payload,
@@ -544,13 +617,15 @@ def test_open_redirect(url: str, params: Dict, session: requests.Session) -> Opt
             pass
     return None
 
-def test_missing_headers(url: str, session: requests.Session) -> Optional[Dict]:
+def test_missing_headers(url: str, session) -> Optional[Dict]:
     """Check for missing security headers on the main page."""
     try:
-        r = session.get(url, timeout=8)
+        r = cf_request(session, "GET", url)
+        if r is None:
+            return None
         headers_lower = {k.lower(): v for k, v in r.headers.items()}
         missing = [h for h in SECURITY_HEADERS if h not in headers_lower]
-        if len(missing) >= 3:  # Only flag if 3+ missing
+        if len(missing) >= 3:
             return {
                 "vulnerable": True,
                 "payload": "N/A",
@@ -562,14 +637,13 @@ def test_missing_headers(url: str, session: requests.Session) -> Optional[Dict]:
         pass
     return None
 
-def test_cors(url: str, session: requests.Session) -> Optional[Dict]:
-    """Check for misconfigured CORS — wildcard or reflecting arbitrary origin."""
+def test_cors(url: str, session) -> Optional[Dict]:
+    """Check for misconfigured CORS."""
     try:
         evil_origin = "https://evil.com"
-        r = session.get(url, timeout=8, headers={
-            **HEADERS,
-            "Origin": evil_origin
-        })
+        r = cf_request(session, "GET", url, headers={**random_headers(), "Origin": evil_origin})
+        if r is None:
+            return None
         acao = r.headers.get("access-control-allow-origin", "")
         acac = r.headers.get("access-control-allow-credentials", "")
         if acao == "*" or acao == evil_origin:
@@ -585,8 +659,8 @@ def test_cors(url: str, session: requests.Session) -> Optional[Dict]:
         pass
     return None
 
-def test_broken_auth(url: str, session: requests.Session) -> Optional[Dict]:
-    """Check if /api/admin or /api/internal returns 200 without auth."""
+def test_broken_auth(url: str, session) -> Optional[Dict]:
+    """Check if admin/internal API endpoints return 200 without auth."""
     admin_paths = [
         "/api/admin", "/api/v1/admin", "/api/internal",
         "/admin/api", "/api/users", "/api/v1/users",
@@ -595,7 +669,9 @@ def test_broken_auth(url: str, session: requests.Session) -> Optional[Dict]:
     base = url.rstrip("/")
     for path in admin_paths:
         try:
-            r = session.get(base + path, timeout=8)
+            r = cf_request(session, "GET", base + path)
+            if r is None:
+                continue
             if r.status_code == 200 and is_json_response(r) and len(r.text) > 20:
                 if not is_spa_response(r.text):
                     return {
@@ -609,7 +685,7 @@ def test_broken_auth(url: str, session: requests.Session) -> Optional[Dict]:
             pass
     return None
 
-async def test_hypothesis(target: str, hyp: Dict, session: requests.Session) -> Optional[Dict]:
+async def test_hypothesis(target: str, hyp: Dict, session) -> Optional[Dict]:
     """Test a single Groq hypothesis with the right detector."""
     endpoint  = hyp.get("endpoint", "/")
     vuln_type = hyp.get("vuln_type", "").lower()

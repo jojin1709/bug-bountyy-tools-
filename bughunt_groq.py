@@ -69,7 +69,7 @@ TOOLS = {
     "katana":    "github.com/projectdiscovery/katana/cmd/katana",
 }
 
-PIP_PACKAGES = ["groq>=0.9.0", "cloudscraper>=1.2.71", "requests>=2.31.0"]
+PIP_PACKAGES = ["groq>=0.9.0", "cloudscraper>=1.2.71", "requests>=2.31.0", "urllib3>=2.0.0"]
 APT_PACKAGES  = ["golang-go", "git", "curl", "jq", "whatweb"]
 
 # Use random_headers() everywhere — no static HEADERS dict
@@ -686,7 +686,7 @@ def test_broken_auth(url: str, session) -> Optional[Dict]:
             pass
     return None
 
-async def test_hypothesis(target: str, hyp: Dict, session) -> Optional[Dict]:
+def test_hypothesis_sync(target: str, hyp: Dict, session) -> Optional[Dict]:
     """Test a single Groq hypothesis with the right detector."""
     endpoint  = hyp.get("endpoint", "/")
     vuln_type = hyp.get("vuln_type", "").lower()
@@ -725,6 +725,29 @@ async def test_hypothesis(target: str, hyp: Dict, session) -> Optional[Dict]:
             "response_sample": finding.get("response_sample", ""),
         }
     return None
+
+async def test_hypothesis(target: str, hyp: Dict) -> Optional[Dict]:
+    """Run a blocking hypothesis test without freezing the asyncio loop."""
+    endpoint = hyp.get("endpoint", "/")
+    vuln_type = hyp.get("vuln_type", "unknown")
+    print(f"[*] Testing {vuln_type}: {endpoint}")
+
+    try:
+        def run_test():
+            session = get_session()
+            return test_hypothesis_sync(target, hyp, session)
+
+        result = await asyncio.to_thread(run_test)
+        if result:
+            print(f"[+] Confirmed {result.get('vuln_type', vuln_type)} at {endpoint}")
+        else:
+            print(f"[-] No finding for {vuln_type}: {endpoint}")
+        return result
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        print(f"[!] Test failed for {vuln_type}: {endpoint} ({e})")
+        return None
 
 # ============ PHASE 4b: NUCLEI SCAN ============
 
@@ -788,9 +811,12 @@ async def test_all(target: str, hypotheses: List[Dict], urls: List[str]) -> List
     """Phase 4: Test all hypotheses + run nuclei."""
     print(f"\n[*] PHASE 4: TESTING {len(hypotheses)} HYPOTHESES (PARALLEL)\n")
 
-    session = get_session()
-    tasks = [test_hypothesis(target, h, session) for h in hypotheses]
-    results = await asyncio.gather(*tasks)
+    tasks = [test_hypothesis(target, h) for h in hypotheses]
+    try:
+        results = await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        print("\n[!] Hunt interrupted during hypothesis testing.")
+        raise
     vulns = [r for r in results if r is not None]
     print(f"[+] Hypothesis testing: {len(vulns)} confirmed findings")
 
@@ -1090,4 +1116,7 @@ Get free Groq API key: https://console.groq.com
 if __name__ == "__main__":
     if sys.platform.lower().startswith("win"):
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n[!] Interrupted by user. Exiting cleanly.")

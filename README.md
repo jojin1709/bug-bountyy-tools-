@@ -142,11 +142,15 @@ Go tools:
 - `httpx`
 - `nuclei`
 - `waybackurls`
+- `gau`
+- `katana`
 
 Python packages:
 
 - `groq`
+- `cloudscraper`
 - `requests`
+- `urllib3`
 
 ## How It Works
 
@@ -167,7 +171,7 @@ Python packages:
 export GROQ_API_KEY="your-groq-api-key-here"
 ```
 
-### `subfinder`, `naabu`, `httpx`, `nuclei`, or `waybackurls` not found
+### `subfinder`, `naabu`, `httpx`, `nuclei`, `gau`, `katana`, or `waybackurls` not found
 
 ```bash
 export PATH="$PATH:$(go env GOPATH)/bin"

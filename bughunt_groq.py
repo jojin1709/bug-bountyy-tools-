@@ -57,11 +57,46 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
 ]
 
+DEFAULT_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+RUNTIME_USER_AGENT = None
+
+def normalize_user_agent(value: str) -> str:
+    """Accept either a full User-Agent or a program suffix to append."""
+    value = value.strip().strip("'\"")
+    if not value:
+        return ""
+
+    # Programs often say "append this value"; make that easy to paste directly.
+    if "mozilla/" not in value.lower() and value.startswith("-"):
+        return f"{DEFAULT_USER_AGENT} {value}"
+
+    return value
+
+def prompt_user_agent_if_needed():
+    """Prompt once during interactive hunts when no UA env var is set."""
+    global RUNTIME_USER_AGENT
+
+    if custom_user_agent() or not sys.stdin.isatty():
+        return
+
+    print("\n[?] Custom User-Agent")
+    print("    Paste the program-required User-Agent or suffix.")
+    print("    Example suffix: -BugBounty-globe-telecom-31337")
+    print("    Press Enter to use rotating browser User-Agents.")
+
+    try:
+        value = input("User-Agent: ").strip()
+    except EOFError:
+        value = ""
+
+    if value:
+        RUNTIME_USER_AGENT = normalize_user_agent(value)
+
 def custom_user_agent() -> Optional[str]:
     """Return program-required user agent from env, when provided."""
-    ua = os.getenv("BUGHUNT_USER_AGENT") or os.getenv("USER_AGENT")
+    ua = os.getenv("BUGHUNT_USER_AGENT") or os.getenv("USER_AGENT") or RUNTIME_USER_AGENT
     if ua and ua.strip():
-        return ua.strip()
+        return normalize_user_agent(ua)
     return None
 
 def selected_user_agent() -> str:
@@ -1491,6 +1526,7 @@ Get free Groq API key: https://console.groq.com
 ╚═══════════════════════════════════════╝
 """)
 
+        prompt_user_agent_if_needed()
         ua = custom_user_agent()
         if ua:
             print(f"[*] Using custom User-Agent: {ua}")

@@ -135,6 +135,18 @@ export BUGHUNT_USER_AGENT="bug-bounty-jojin1709 contact: your-email@example.com"
 python3 bughunt_groq.py hunt example.com
 ```
 
+You can also leave `BUGHUNT_USER_AGENT` unset. The scanner will ask you to paste it when the hunt starts:
+
+```bash
+python3 bughunt_groq.py hunt example.com
+```
+
+If the program says to append a value, paste only that suffix when prompted:
+
+```text
+-BugBounty-globe-telecom-31337
+```
+
 You can also copy `.env.example` to `.env`, edit it, and load it:
 
 ```bash

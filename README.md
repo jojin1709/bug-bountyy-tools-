@@ -219,6 +219,25 @@ echo 'export PATH="$PATH:$(go env GOPATH)/bin"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
+### `httpx` says `pip install 'httpx[cli]'`
+
+That is the Python `httpx` CLI from your virtual environment, not ProjectDiscovery `httpx`.
+
+Fix by installing the Go tool and putting Go tools before the venv command:
+
+```bash
+go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+export PATH="$(go env GOPATH)/bin:$PATH"
+python3 bughunt_groq.py setup
+```
+
+Check which one is running:
+
+```bash
+which httpx
+httpx -version
+```
+
 ### Python package errors
 
 Activate the virtual environment and reinstall dependencies:

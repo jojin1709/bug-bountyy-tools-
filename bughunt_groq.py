@@ -17,6 +17,7 @@ import shlex
 import urllib3
 import html as html_lib
 from typing import List, Dict, Optional
+from pathlib import Path
 from urllib.parse import urlparse, urlencode
 
 # Suppress SSL warnings — intentional for bug bounty
@@ -184,6 +185,40 @@ def run_cmd(cmd: str, timeout: int = 120) -> str:
     except Exception:
         return ""
 
+def clean_terminal_output(text: str) -> str:
+    """Remove terminal color/control codes before storing output in reports."""
+    return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text or "")
+
+def go_bin_dir() -> Optional[Path]:
+    try:
+        out = subprocess.run(
+            "go env GOPATH", shell=True, capture_output=True, text=True, timeout=10
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return Path(out.stdout.strip()) / "bin"
+    except Exception:
+        pass
+    return None
+
+def tool_cmd(name: str) -> str:
+    """Prefer Go-installed security tools over same-named Python venv commands."""
+    if name in TOOLS:
+        bin_dir = go_bin_dir()
+        if bin_dir:
+            candidate = bin_dir / name
+            if candidate.exists():
+                return shlex.quote(str(candidate))
+    return name
+
+def is_real_httpx(output: str) -> bool:
+    bad_markers = [
+        "required dependencies were not installed",
+        "pip install 'httpx[cli]'",
+        "the httpx command line client could not run",
+    ]
+    lowered = output.lower()
+    return not any(marker in lowered for marker in bad_markers)
+
 def run_optional_cmd(label: str, cmd: str, timeout: int = 45) -> str:
     """Run a best-effort recon command without making slow providers look fatal."""
     try:
@@ -332,6 +367,10 @@ def is_json_response(r: requests.Response) -> bool:
 # ============ SETUP ============
 
 def check_tool(name: str) -> bool:
+    if name in TOOLS:
+        cmd = tool_cmd(name)
+        if cmd != name:
+            return True
     return subprocess.run(f"which {name}", shell=True,
                           capture_output=True).returncode == 0
 
@@ -344,7 +383,8 @@ def install_apt(pkg: str):
     print(f"[+] {pkg} installed" if r.returncode == 0 else f"[!] Failed: {pkg}")
 
 def install_go_tool(name: str, repo: str):
-    if check_tool(name):
+    bin_dir = go_bin_dir()
+    if bin_dir and (bin_dir / name).exists():
         print(f"[+] {name} already installed")
         return
     print(f"[*] Installing {name}...")
@@ -384,6 +424,12 @@ def recon(target: str) -> Dict:
     print(f"\n[*] PHASE 1: RECON on {target}\n")
     header_arg = user_agent_header_arg()
     whatweb_ua_arg = whatweb_user_agent_arg()
+    subfinder_cmd = tool_cmd("subfinder")
+    httpx_cmd = tool_cmd("httpx")
+    naabu_cmd = tool_cmd("naabu")
+    gau_cmd = tool_cmd("gau")
+    waybackurls_cmd = tool_cmd("waybackurls")
+    katana_cmd = tool_cmd("katana")
     results = {
         "target": target,
         "subdomains": [],
@@ -396,7 +442,7 @@ def recon(target: str) -> Dict:
 
     # Subdomains
     print("[*] Enumerating subdomains (subfinder)...")
-    out = run_cmd(f"subfinder -d {target} -silent -t 100", timeout=180)
+    out = run_cmd(f"{subfinder_cmd} -d {target} -silent -t 100", timeout=180)
     results["subdomains"] = [s.strip() for s in out.split("\n") if s.strip()]
     # Always include the target itself
     if target not in results["subdomains"]:
@@ -407,16 +453,22 @@ def recon(target: str) -> Dict:
     print("[*] Checking live hosts (httpx)...")
     subs_str = "\n".join(results["subdomains"][:30])
     out = run_cmd(
-        f"echo '{subs_str}' | httpx -silent -status-code -title -timeout 8 -follow-redirects{header_arg}",
+        f"echo '{subs_str}' | {httpx_cmd} -silent -status-code -title -timeout 8 -follow-redirects{header_arg}",
         timeout=120
     )
-    results["live_hosts"] = [h.strip() for h in out.split("\n") if h.strip()]
+    if not is_real_httpx(out):
+        print("[!] ProjectDiscovery httpx not found. Run: python3 bughunt_groq.py setup")
+        out = ""
+    results["live_hosts"] = [
+        h.strip() for h in out.split("\n")
+        if h.strip().startswith(("http://", "https://"))
+    ]
     print(f"[+] Found {len(results['live_hosts'])} live hosts")
 
     # Port scan
     print("[*] Port scanning (naabu)...")
     out = run_cmd(
-        f"naabu -host {target} -top-ports 1000 -rate 500 -silent",
+        f"{naabu_cmd} -host {target} -top-ports 1000 -rate 500 -silent",
         timeout=300
     )
     results["ports"] = [p.strip() for p in out.split("\n") if p.strip()]
@@ -425,8 +477,8 @@ def recon(target: str) -> Dict:
     # Historical URLs are best-effort. Archive providers can be slow or rate limited.
     print("[*] Fetching URLs (gau + waybackurls)...")
     archive_timeout = env_int("ARCHIVE_TIMEOUT", 45)
-    out1 = run_optional_cmd("gau", f"echo {target} | gau --threads 5", timeout=archive_timeout)
-    out2 = run_optional_cmd("waybackurls", f"echo {target} | waybackurls", timeout=archive_timeout)
+    out1 = run_optional_cmd("gau", f"echo {target} | {gau_cmd} --threads 5", timeout=archive_timeout)
+    out2 = run_optional_cmd("waybackurls", f"echo {target} | {waybackurls_cmd}", timeout=archive_timeout)
     all_urls = set()
     for line in (out1 + "\n" + out2).split("\n"):
         u = line.strip()
@@ -441,13 +493,13 @@ def recon(target: str) -> Dict:
     # Tech stack
     print("[*] Detecting tech stack (whatweb)...")
     out = run_cmd(f"whatweb -a 3{whatweb_ua_arg} https://{target} 2>/dev/null", timeout=60)
-    results["tech"] = out[:800]
+    results["tech"] = clean_terminal_output(out)[:800]
     print(f"[+] Tech detected")
 
     # Crawl with katana for fresh endpoints
     print("[*] Crawling (katana)...")
     out = run_cmd(
-        f"katana -u https://{target} -d 2 -silent -jc -timeout 10{header_arg}",
+        f"{katana_cmd} -u https://{target} -d 2 -silent -jc -timeout 10{header_arg}",
         timeout=120
     )
     katana_urls = [u.strip() for u in out.split("\n") if u.strip() and target in u]
@@ -851,8 +903,10 @@ def run_nuclei(target: str, urls: List[str]) -> List[Dict]:
         print("[!] nuclei not installed. Run: python3 bughunt_groq.py setup")
         return []
 
+    nuclei_cmd = tool_cmd("nuclei")
+
     # Update templates silently
-    run_cmd("nuclei -update-templates -silent 2>/dev/null", timeout=60)
+    run_cmd(f"{nuclei_cmd} -update-templates -silent 2>/dev/null", timeout=60)
 
     # Write URLs to temp file
     url_file = f"/tmp/bughunt_urls_{int(time.time())}.txt"
@@ -865,7 +919,7 @@ def run_nuclei(target: str, urls: List[str]) -> List[Dict]:
     print(f"[*] Running nuclei on {len(all_targets)} targets...")
     header_arg = user_agent_header_arg()
     out = run_cmd(
-        f"nuclei -l {url_file} -severity critical,high,medium "
+        f"{nuclei_cmd} -l {url_file} -severity critical,high,medium "
         f"-tags cve,exposure,misconfig,takeover,default-login "
         f"{header_arg} -silent -json -timeout 10 2>/dev/null",
         timeout=300
@@ -884,7 +938,7 @@ def run_nuclei(target: str, urls: List[str]) -> List[Dict]:
                 "reason":          item.get("info", {}).get("description", ""),
                 "payload":         item.get("template-id", ""),
                 "evidence":        f"Severity: {item.get('info', {}).get('severity', '?')}",
-                "poc":             f"nuclei -u {item.get('matched-at', '')} -t {item.get('template-id', '')}",
+                "poc":             f"{nuclei_cmd} -u {item.get('matched-at', '')} -t {item.get('template-id', '')}",
                 "response_sample": str(item.get("extracted-results", ""))[:300],
             })
         except Exception:

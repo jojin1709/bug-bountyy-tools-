@@ -184,6 +184,41 @@ def run_cmd(cmd: str, timeout: int = 120) -> str:
     except Exception:
         return ""
 
+def run_optional_cmd(label: str, cmd: str, timeout: int = 45) -> str:
+    """Run a best-effort recon command without making slow providers look fatal."""
+    try:
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=timeout
+        )
+        return result.stdout.strip()
+    except subprocess.TimeoutExpired:
+        print(f"[-] {label} skipped after {timeout}s; continuing")
+        return ""
+    except Exception as e:
+        print(f"[-] {label} skipped: {e}")
+        return ""
+
+def is_wsl() -> bool:
+    if not sys.platform.lower().startswith("linux"):
+        return False
+    try:
+        with open("/proc/version", "r", encoding="utf-8", errors="ignore") as f:
+            version = f.read().lower()
+            return "microsoft" in version or "wsl" in version
+    except Exception:
+        return False
+
+def report_open_hint(filename: str) -> str:
+    if is_wsl():
+        return f'explorer.exe "$(wslpath -w {filename})"'
+    return f"firefox {filename}"
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
 def esc(value) -> str:
     """Escape values before inserting them into the HTML report."""
     return html_lib.escape(str(value), quote=True)
@@ -387,10 +422,11 @@ def recon(target: str) -> Dict:
     results["ports"] = [p.strip() for p in out.split("\n") if p.strip()]
     print(f"[+] Found {len(results['ports'])} open ports")
 
-    # Historical URLs via gau (better than waybackurls)
+    # Historical URLs are best-effort. Archive providers can be slow or rate limited.
     print("[*] Fetching URLs (gau + waybackurls)...")
-    out1 = run_cmd(f"echo {target} | gau --threads 5", timeout=120)
-    out2 = run_cmd(f"echo {target} | waybackurls", timeout=120)
+    archive_timeout = env_int("ARCHIVE_TIMEOUT", 45)
+    out1 = run_optional_cmd("gau", f"echo {target} | gau --threads 5", timeout=archive_timeout)
+    out2 = run_optional_cmd("waybackurls", f"echo {target} | waybackurls", timeout=archive_timeout)
     all_urls = set()
     for line in (out1 + "\n" + out2).split("\n"):
         u = line.strip()
@@ -1252,7 +1288,7 @@ Get free Groq API key: https://console.groq.com
 ║   Findings: {len(vulns):<26} ║
 ╚═══════════════════════════════════════╝
 """)
-        print(f"[+] firefox {filename}\n")
+        print(f"[+] Open report: {report_open_hint(filename)}\n")
 
 if __name__ == "__main__":
     if sys.platform.lower().startswith("win"):

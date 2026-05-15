@@ -119,6 +119,7 @@ Optional:
 ```bash
 export TOOL_TIMEOUT="120"
 export PARALLEL_TESTS="10"
+export ARCHIVE_TIMEOUT="45"
 export BUGHUNT_USER_AGENT="your-program-approved-user-agent"
 export HTTP_PROXY="http://proxy:8080"
 export HTTPS_PROXY="http://proxy:8080"
@@ -179,6 +180,25 @@ Python packages:
 9. Generates an HTML report.
 
 ## Troubleshooting
+
+### `gau` or `waybackurls` skipped after timeout
+
+Archive URL providers can be slow or rate limited. The scanner will continue with URLs from `katana`.
+
+To wait longer:
+
+```bash
+export ARCHIVE_TIMEOUT="120"
+python3 bughunt_groq.py hunt example.com
+```
+
+### Firefox shows WSL graphics warnings
+
+Those warnings are usually harmless. If the report does not open in Kali Firefox, open it in Windows:
+
+```bash
+explorer.exe "$(wslpath -w example_com_report.html)"
+```
 
 ### `GROQ_API_KEY not set`
 

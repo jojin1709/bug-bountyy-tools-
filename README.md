@@ -43,6 +43,32 @@ The report is generated as an HTML file, for example:
 example_com_report.html
 ```
 
+## Update Existing Install
+
+If you already cloned this repo before and only want the newest edited files:
+
+```bash
+cd bug-bountyy-tools-
+git pull origin main
+```
+
+Then refresh Python dependencies:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements_groq.txt --upgrade
+```
+
+If you edited files locally and Git refuses to pull, save your local edits first:
+
+```bash
+cd bug-bountyy-tools-
+git status
+git stash
+git pull origin main
+git stash pop
+```
+
 ## Alternative Setup Script
 
 After cloning the repo:

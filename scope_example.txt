@@ -1,0 +1,23 @@
+# Example Scope File for BugHunt.ai
+# One domain per line
+# Lines starting with # = comments (ignored)
+
+# Main domain
+example.com
+
+# Subdomains
+api.example.com
+admin.example.com
+app.example.com
+
+# Wildcard subdomains
+*.internal.example.com
+
+# Alternate domains
+example.io
+api.example.io
+
+# Out of scope examples (remove these):
+# social.example.com
+# marketing.example.com
+# careers.example.com

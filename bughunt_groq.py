@@ -13,6 +13,7 @@ import json
 import time
 import re
 import random
+import shlex
 import urllib3
 from typing import List, Dict, Optional
 from urllib.parse import urlparse, urlencode
@@ -40,8 +41,30 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
 ]
 
+def custom_user_agent() -> Optional[str]:
+    """Return program-required user agent from env, when provided."""
+    ua = os.getenv("BUGHUNT_USER_AGENT") or os.getenv("USER_AGENT")
+    if ua and ua.strip():
+        return ua.strip()
+    return None
+
+def selected_user_agent() -> str:
+    return custom_user_agent() or random.choice(USER_AGENTS)
+
+def user_agent_header_arg() -> str:
+    ua = custom_user_agent()
+    if not ua:
+        return ""
+    return f" -H {shlex.quote(f'User-Agent: {ua}')}"
+
+def whatweb_user_agent_arg() -> str:
+    ua = custom_user_agent()
+    if not ua:
+        return ""
+    return f" --user-agent {shlex.quote(ua)}"
+
 def random_headers() -> Dict:
-    ua = random.choice(USER_AGENTS)
+    ua = selected_user_agent()
     return {
         "User-Agent": ua,
         "Accept": "application/json, text/html, */*;q=0.9",
@@ -291,6 +314,8 @@ def setup():
 
 def recon(target: str) -> Dict:
     print(f"\n[*] PHASE 1: RECON on {target}\n")
+    header_arg = user_agent_header_arg()
+    whatweb_ua_arg = whatweb_user_agent_arg()
     results = {
         "target": target,
         "subdomains": [],
@@ -314,7 +339,7 @@ def recon(target: str) -> Dict:
     print("[*] Checking live hosts (httpx)...")
     subs_str = "\n".join(results["subdomains"][:30])
     out = run_cmd(
-        f"echo '{subs_str}' | httpx -silent -status-code -title -timeout 8 -follow-redirects",
+        f"echo '{subs_str}' | httpx -silent -status-code -title -timeout 8 -follow-redirects{header_arg}",
         timeout=120
     )
     results["live_hosts"] = [h.strip() for h in out.split("\n") if h.strip()]
@@ -346,14 +371,14 @@ def recon(target: str) -> Dict:
 
     # Tech stack
     print("[*] Detecting tech stack (whatweb)...")
-    out = run_cmd(f"whatweb -a 3 https://{target} 2>/dev/null", timeout=60)
+    out = run_cmd(f"whatweb -a 3{whatweb_ua_arg} https://{target} 2>/dev/null", timeout=60)
     results["tech"] = out[:800]
     print(f"[+] Tech detected")
 
     # Crawl with katana for fresh endpoints
     print("[*] Crawling (katana)...")
     out = run_cmd(
-        f"katana -u https://{target} -d 2 -silent -jc -timeout 10",
+        f"katana -u https://{target} -d 2 -silent -jc -timeout 10{header_arg}",
         timeout=120
     )
     katana_urls = [u.strip() for u in out.split("\n") if u.strip() and target in u]
@@ -772,10 +797,11 @@ def run_nuclei(target: str, urls: List[str]) -> List[Dict]:
 
     # Run nuclei — critical+high severity, common tags
     print(f"[*] Running nuclei on {len(all_targets)} targets...")
+    header_arg = user_agent_header_arg()
     out = run_cmd(
         f"nuclei -l {url_file} -severity critical,high,medium "
         f"-tags cve,exposure,misconfig,takeover,default-login "
-        f"-silent -json -timeout 10 2>/dev/null",
+        f"{header_arg} -silent -json -timeout 10 2>/dev/null",
         timeout=300
     )
 
@@ -1087,6 +1113,10 @@ Get free Groq API key: https://console.groq.com
 ║   Groq: FREE AI Powered               ║
 ╚═══════════════════════════════════════╝
 """)
+
+        ua = custom_user_agent()
+        if ua:
+            print(f"[*] Using custom User-Agent: {ua}")
 
         recon_data   = recon(target)
         filtered     = filter_scope(recon_data, scope)

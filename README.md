@@ -113,8 +113,16 @@ Optional:
 ```bash
 export TOOL_TIMEOUT="120"
 export PARALLEL_TESTS="10"
+export BUGHUNT_USER_AGENT="your-program-approved-user-agent"
 export HTTP_PROXY="http://proxy:8080"
 export HTTPS_PROXY="http://proxy:8080"
+```
+
+If a bug bounty program asks you to use a specific user agent, copy and paste it like this before running:
+
+```bash
+export BUGHUNT_USER_AGENT="bug-bounty-jojin1709 contact: your-email@example.com"
+python3 bughunt_groq.py hunt example.com
 ```
 
 You can also copy `.env.example` to `.env`, edit it, and load it:

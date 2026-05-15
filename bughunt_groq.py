@@ -19,7 +19,7 @@ try:
     import requests
     from groq import Groq
 except ImportError:
-    print("[!] Missing dependencies. Run: python3 bughunt.py setup")
+    print("[!] Missing dependencies. Run: pip3 install -r requirements_groq.txt")
     sys.exit(1)
 
 # ============ CONFIG ============
@@ -28,10 +28,11 @@ TOOLS = {
     "naabu": "github.com/projectdiscovery/naabu/v2/cmd/naabu",
     "httpx": "github.com/projectdiscovery/httpx/cmd/httpx",
     "nuclei": "github.com/projectdiscovery/nuclei/v3/cmd/nuclei",
+    "waybackurls": "github.com/tomnomnom/waybackurls",
 }
 
 PIP_PACKAGES = ["groq", "requests"]
-APT_PACKAGES = ["golang-go", "git", "curl", "jq"]
+APT_PACKAGES = ["golang-go", "git", "curl", "jq", "whatweb"]
 
 # Payloads for testing
 PAYLOADS = {
@@ -167,7 +168,7 @@ def setup():
 ║     2. Set env variable:              ║
 ║        export GROQ_API_KEY="..."      ║
 ║     3. Hunt:                          ║
-║        python3 bughunt.py hunt <url>  ║
+║        python3 bughunt_groq.py hunt <url>  ║
 ╚═══════════════════════════════════════╝
 """)
 
@@ -623,14 +624,14 @@ async def main():
 ╚═══════════════════════════════════════╝
 
 Usage:
-  python3 bughunt.py setup              # Install everything
-  python3 bughunt.py hunt <target>      # Run hunt
-  python3 bughunt.py hunt <target> <scope>
+  python3 bughunt_groq.py setup              # Install everything
+  python3 bughunt_groq.py hunt <target>      # Run hunt
+  python3 bughunt_groq.py hunt <target> <scope>
 
 Example:
-  python3 bughunt.py setup
-  python3 bughunt.py hunt target.com
-  python3 bughunt.py hunt target.com scope.txt
+  python3 bughunt_groq.py setup
+  python3 bughunt_groq.py hunt target.com
+  python3 bughunt_groq.py hunt target.com scope.txt
 
 Get free Groq API key:
   https://console.groq.com (no credit card)
@@ -648,7 +649,7 @@ Set environment:
     
     if cmd == "hunt":
         if len(sys.argv) < 3:
-            print("Usage: python3 bughunt.py hunt <target> [scope.txt]")
+            print("Usage: python3 bughunt_groq.py hunt <target> [scope.txt]")
             sys.exit(1)
         
         target = sys.argv[2]

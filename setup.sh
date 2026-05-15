@@ -14,5 +14,10 @@ fi
 echo "[+] Python3 found"
 echo ""
 
+# Install Python dependencies first so the main script can start.
+if [ -f requirements_groq.txt ]; then
+    python3 -m pip install -r requirements_groq.txt
+fi
+
 # Run Python setup
-python3 bughunt.py setup
+python3 bughunt_groq.py setup

@@ -124,6 +124,7 @@ export BUGHUNT_DELAY_MIN="0.8"
 export BUGHUNT_DELAY_MAX="2.5"
 export ARCHIVE_TIMEOUT="45"
 export BUGHUNT_USER_AGENT="your-program-approved-user-agent"
+export BUGHUNT_HEADER="X-HackerOne-Research: your-h1-username"
 export HTTP_PROXY="http://proxy:8080"
 export HTTPS_PROXY="http://proxy:8080"
 ```
@@ -183,6 +184,12 @@ For authenticated testing, use only your own test account/session:
 ```bash
 export BUGHUNT_COOKIE="session=your-own-session-cookie"
 export BUGHUNT_AUTHORIZATION="Bearer your-own-token"
+```
+
+For programs that require a tracking header:
+
+```bash
+export BUGHUNT_HEADER="X-HackerOne-Research: hackjojo"
 ```
 
 ## What Setup Installs

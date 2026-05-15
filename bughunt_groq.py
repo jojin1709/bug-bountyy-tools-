@@ -108,6 +108,18 @@ def user_agent_header_arg() -> str:
         return ""
     return f" -H {shlex.quote(f'User-Agent: {ua}')}"
 
+def custom_header() -> Optional[str]:
+    header = os.getenv("BUGHUNT_HEADER", "").strip()
+    if ":" not in header:
+        return None
+    return header
+
+def extra_header_args() -> str:
+    header = custom_header()
+    if not header:
+        return ""
+    return f" -H {shlex.quote(header)}"
+
 def whatweb_user_agent_arg() -> str:
     ua = custom_user_agent()
     if not ua:
@@ -362,11 +374,15 @@ def apply_user_auth_headers(headers: Dict) -> Dict:
     """Attach user-provided auth only when the tester explicitly supplies it."""
     cookie = os.getenv("BUGHUNT_COOKIE", "").strip()
     authorization = os.getenv("BUGHUNT_AUTHORIZATION", "").strip()
+    extra_header = custom_header()
 
     if cookie:
         headers["Cookie"] = cookie
     if authorization:
         headers["Authorization"] = authorization
+    if extra_header:
+        name, value = extra_header.split(":", 1)
+        headers[name.strip()] = value.strip()
 
     return headers
 
@@ -549,6 +565,7 @@ def doctor():
     print("\n[*] Environment")
     print(f"  GROQ_API_KEY: {'set' if os.getenv('GROQ_API_KEY') else 'missing'}")
     print(f"  BUGHUNT_USER_AGENT: {'set' if custom_user_agent() else 'missing'}")
+    print(f"  BUGHUNT_HEADER: {'set' if custom_header() else 'missing'}")
     print(f"  BUGHUNT_COOKIE: {'set' if os.getenv('BUGHUNT_COOKIE') else 'missing'}")
     print(f"  BUGHUNT_AUTHORIZATION: {'set' if os.getenv('BUGHUNT_AUTHORIZATION') else 'missing'}")
     print(f"  PARALLEL_TESTS: {clamp(env_int('PARALLEL_TESTS', 4), 1, 10)}")
@@ -559,7 +576,7 @@ def doctor():
 
 def recon(target: str) -> Dict:
     print(f"\n[*] PHASE 1: RECON on {target}\n")
-    header_arg = user_agent_header_arg()
+    header_arg = user_agent_header_arg() + extra_header_args()
     whatweb_ua_arg = whatweb_user_agent_arg()
     subfinder_cmd = tool_cmd("subfinder")
     httpx_cmd = tool_cmd("httpx")
@@ -1116,7 +1133,7 @@ def run_nuclei(target: str, urls: List[str]) -> List[Dict]:
 
     # Run nuclei — critical+high severity, common tags
     print(f"[*] Running nuclei on {len(all_targets)} targets...")
-    header_arg = user_agent_header_arg()
+    header_arg = user_agent_header_arg() + extra_header_args()
     out = run_cmd(
         f"{nuclei_cmd} -l {url_file} -severity critical,high,medium "
         f"-tags cve,exposure,misconfig,takeover,default-login "

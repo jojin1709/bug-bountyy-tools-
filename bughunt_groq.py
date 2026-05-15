@@ -22,6 +22,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 try:
     import cloudscraper
+    import requests
     from groq import Groq
 except ImportError:
     print("[!] Missing dependencies. Run: pip3 install -r requirements_groq.txt")
